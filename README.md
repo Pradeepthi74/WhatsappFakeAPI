@@ -64,5 +64,3 @@ Marking a message sent saves `sent_at`; marking it pending clears that timestamp
 - `templates/index.html`: dashboard, styles, and JavaScript.
 - `requirements.txt`: Flask dependency.
 - `.gitignore`: excludes `docs/`, virtual environments, databases, and caches.
-
-Development and hosting guides are kept locally under the ignored `docs/` folder. The current app has no authentication; add dashboard and API protection before exposing real message data publicly.
