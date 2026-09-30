@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WhatsApp Message Queue</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; color: #25302b; background: #fff; font: 14px/1.5 system-ui, sans-serif; }
+    main { max-width: 1200px; margin: 32px auto; padding: 0 20px; }
+    header, .controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    h1 { font-size: 21px; font-weight: 600; margin: 0; }
+    .hint { color: #626b66; margin: 8px 0 20px; }
+    .controls { margin-bottom: 12px; }
+    select, button { font: inherit; padding: 5px 9px; border: 1px solid #bdc6c0; border-radius: 4px; background: #fff; color: inherit; }
+    button, input[type=checkbox] { cursor: pointer; }
+    input[type=checkbox] { width: 17px; height: 17px; accent-color: #426e54; }
+    :focus-visible { outline: 2px solid #426e54; outline-offset: 3px; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 690px; }
+    th, td { padding: 12px 10px; text-align: left; border-bottom: 1px solid #e1e5e2; vertical-align: top; }
+    th { color: #5c655f; font-weight: 500; border-top: 1px solid #e1e5e2; }
+    th:nth-child(1) { width: 58px; }
+    th:nth-child(2) { width: 155px; }
+    th:nth-child(4) { width: 180px; }
+    th:nth-child(5) { width: 145px; }
+    .message { white-space: pre-wrap; overflow-wrap: anywhere; }
+    tr.sent { background: #f5f7f5; color: #59645e; }
+    a { color: #326047; text-underline-offset: 3px; }
+    #notice { min-height: 22px; color: #8a3f25; margin: 8px 0; }
+    .empty { text-align: center; padding: 28px; color: #626b66; }
+    @media (max-width: 600px) { main { margin: 20px auto; padding: 0 12px; } h1 { font-size: 19px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>WhatsApp Message Queue</h1>
+      <label>Sort:
+        <select id="sort">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="pending">Pending first</option>
+          <option value="sent">Sent first</option>
+        </select>
+      </label>
+    </header>
+    <p class="hint">Open a chat, send the message in WhatsApp, then check Sent. Updates every 3 seconds.</p>
+    <div class="controls">
+      <span id="counts" aria-live="polite">Loading messages…</span>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <div class="table-scroll" role="region" aria-label="Message queue; scroll horizontally on small screens" tabindex="0">
+      <table aria-label="Latest 100 message requests">
+        <thead><tr><th scope="col">Sent</th><th scope="col">Phone</th><th scope="col">Message</th><th scope="col">Created At</th><th scope="col">WhatsApp</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5" class="empty">Loading messages…</td></tr></tbody>
+      </table>
+    </div>
+    <noscript>Enable JavaScript to load messages and save their status.</noscript>
+  </main>
+  <script>
+    const rows = document.querySelector('#rows');
+    const sort = document.querySelector('#sort');
+    const refresh = document.querySelector('#refresh');
+    const notice = document.querySelector('#notice');
+    let records = [], signature = null, loading = false, saving = false, revision = 0;
+    const dates = new Intl.DateTimeFormat(undefined, {
+      day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+
+    async function api(url, options = {}) {
+      const response = await fetch(url, { ...options, cache: 'no-store', signal: AbortSignal.timeout(10000) });
+      const body = await response.json();
+      if (!response.ok || !body.success) throw new Error(body.error || 'Request failed');
+      return body.data;
+    }
+
+    function cell(text, className) {
+      const element = document.createElement('td');
+      element.textContent = text;
+      if (className) element.className = className;
+      return element;
+    }
+
+    function render() {
+      const newest = (a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id;
+      const ordered = [...records].sort((a, b) => {
+        if (sort.value === 'oldest') return newest(b, a);
+        if (sort.value === 'pending' || sort.value === 'sent') {
+          const group = Number(b.status === sort.value) - Number(a.status === sort.value);
+          if (group) return group;
+        }
+        return newest(a, b);
+      });
+      const fragment = document.createDocumentFragment();
+      for (const record of ordered) {
+        const row = document.createElement('tr');
+        row.className = record.status;
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = record.status === 'sent';
+        checkbox.disabled = saving;
+        checkbox.setAttribute('aria-label', `Mark message ${record.id} to ${record.phone} as sent`);
+        checkbox.addEventListener('change', () => saveStatus(record, checkbox.checked));
+        const sentCell = cell('');
+        sentCell.append(checkbox);
+        const dateCell = cell('');
+        const time = document.createElement('time');
+        time.dateTime = record.created_at;
+        time.textContent = dates.format(new Date(record.created_at));
+        time.title = record.created_at;
+        dateCell.append(time);
+        const linkCell = cell('');
+        const link = document.createElement('a');
+        link.href = `https://wa.me/${record.phone}?text=${encodeURIComponent(record.message)}`;
+        link.textContent = 'Open WhatsApp';
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        linkCell.append(link);
+        row.append(sentCell, cell(record.phone), cell(record.message, 'message'), dateCell, linkCell);
+        fragment.append(row);
+      }
+      if (!ordered.length) {
+        const row = document.createElement('tr');
+        const empty = cell('No messages yet. Send a request to POST /api/messages.', 'empty');
+        empty.colSpan = 5;
+        row.append(empty);
+        fragment.append(row);
+      }
+      rows.replaceChildren(fragment);
+      const sent = records.filter(record => record.status === 'sent').length;
+      document.querySelector('#counts').textContent = `Pending: ${records.length - sent}   Sent: ${sent} · Latest 100`;
+    }
+
+    async function load() {
+      if (loading || saving) return;
+      loading = true;
+      refresh.disabled = true;
+      const startedAt = revision;
+      try {
+        const data = await api('/api/messages');
+        if (startedAt !== revision) return;
+        const nextSignature = JSON.stringify(data);
+        if (nextSignature !== signature) {
+          records = data;
+          signature = nextSignature;
+          render();
+        }
+        // Preserve a failed-save notice until the next user action.
+        if (notice.dataset.kind === 'load') notice.textContent = '';
+      } catch (error) {
+        if (startedAt !== revision) return;
+        notice.dataset.kind = 'load';
+        notice.textContent = 'Could not refresh messages. Retrying automatically. ' + error.message;
+        if (signature === null) document.querySelector('#counts').textContent = 'Messages unavailable';
+      } finally {
+        loading = false;
+        refresh.disabled = saving;
+      }
+    }
+
+    async function saveStatus(record, checked) {
+      if (saving) return;
+      saving = true;
+      revision++;
+      refresh.disabled = true;
+      rows.querySelectorAll('input').forEach(input => { input.disabled = true; });
+      notice.textContent = '';
+      try {
+        const updated = await api(`/api/messages/${record.id}/status`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: checked ? 'sent' : 'pending' })
+        });
+        records = records.map(item => item.id === updated.id ? updated : item);
+        signature = JSON.stringify(records);
+      } catch (error) {
+        notice.dataset.kind = 'save';
+        notice.textContent = 'Status was not saved; the checkbox has been restored. ' + error.message;
+      } finally {
+        saving = false;
+        refresh.disabled = loading;
+        render();
+      }
+    }
+
+    sort.addEventListener('change', render);
+    refresh.addEventListener('click', load);
+    load();
+    setInterval(load, 3000);
+  </script>
+</body>
+</html>
